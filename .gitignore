@@ -1,0 +1,25 @@
+# Secrets — NEVER commit these
+.env
+
+# Cloned repositories (runtime data)
+repos/
+
+# ChromaDB local vector store
+chroma_db/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
