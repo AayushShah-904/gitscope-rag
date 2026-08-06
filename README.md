@@ -11,7 +11,7 @@
 [![Azure OpenAI](https://img.shields.io/badge/Azure%20OpenAI-GPT--4.1-0078D4?style=flat-square&logo=microsoftazure&logoColor=white)](https://azure.microsoft.com/en-us/products/ai-services/openai-service)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-[**Live Demo →**](https://share.streamlit.io) &nbsp;|&nbsp; [**Report a Bug**](https://github.com/AayushShah-904/gitscope-rag/issues) &nbsp;|&nbsp; [**Request a Feature**](https://github.com/AayushShah-904/gitscope-rag/issues)
+[**Live Demo →**](https://gitscope-rag.streamlit.app/) &nbsp;|&nbsp; [**Report a Bug**](https://github.com/AayushShah-904/gitscope-rag/issues) &nbsp;|&nbsp; [**Request a Feature**](https://github.com/AayushShah-904/gitscope-rag/issues)
 
 </div>
 
