@@ -258,12 +258,6 @@ class RepoQA:
         # Holds a simple history of the conversation to handle follow-up questions
         self.history: list[dict] = []
 
-        # Stores the file sources cited in the most recent answer (for the source viewer)
-        self.last_sources: list[str] = []
-
-        # Path to the cloned repository on disk (set by the Streamlit app after ingestion)
-        self.repo_dir: str = ""
-
     def _trim_history(self) -> list[dict]:
         return self.history[-(MAX_HISTORY * 2):]
 
@@ -301,8 +295,6 @@ class RepoQA:
             "stream_answer complete | %d source(s) cited | response length: %d chars",
             len(sources), len(full_response),
         )
-        # Expose sources so the Streamlit app can render the source code viewer
-        self.last_sources = list(sources)
         self._record_turn(question, full_response)
 
     def answer(self, question: str) -> tuple[str, list[Document]]:

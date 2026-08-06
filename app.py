@@ -31,7 +31,6 @@ st.info(
 # 2. Initialize session state variables
 if "repo_url"    not in st.session_state: st.session_state.repo_url    = ""
 if "repo_id"     not in st.session_state: st.session_state.repo_id     = None
-if "repo_dir"    not in st.session_state: st.session_state.repo_dir    = ""   # path to cloned repo on disk
 if "qa"          not in st.session_state: st.session_state.qa          = None
 if "messages"    not in st.session_state: st.session_state.messages    = []
 if "summarized"  not in st.session_state: st.session_state.summarized  = False
@@ -108,8 +107,7 @@ if ingest_btn and repo_url:
     with st.spinner("Cloning and indexing codebase (takes ~1-2 mins for medium repos) ..."):
         try:
             from ingest import ingest
-            vs, repo_id, repo_dir = ingest(repo_url, force_reingest=force)
-            st.session_state.repo_dir = repo_dir
+            vs, repo_id = ingest(repo_url, force_reingest=force)
         except Exception as e:
             logger.exception("Ingestion failed for %s: %s", repo_url, e)
             st.error(f"Ingestion failed: {e}")
@@ -118,9 +116,7 @@ if ingest_btn and repo_url:
     with st.spinner("Building pinned repository card (~15 secs) ..."):
         try:
             from qa_engine import RepoQA
-            qa = RepoQA(vs, repo_url=repo_url)
-            qa.repo_dir = repo_dir          # expose repo dir to the engine
-            st.session_state.qa      = qa
+            st.session_state.qa      = RepoQA(vs, repo_url=repo_url)
             st.session_state.repo_id = repo_id
         except Exception as e:
             logger.exception("Failed to initialise RepoQA for %s: %s", repo_url, e)
@@ -130,49 +126,6 @@ if ingest_btn and repo_url:
     logger.info("Repository indexed successfully: %s (repo_id=%s)", repo_url, repo_id)
     st.success("Repository indexed successfully! Check out the dashboard below.")
     st.rerun()
-
-
-# ── Helper: render source code expanders for files cited in an answer ──
-def _render_source_viewer(sources: list[str], repo_dir: str) -> None:
-    """Displays a collapsible expander for each cited source file."""
-    if not sources:
-        return
-
-    # Auto-heal: derive repo_dir if missing in session state
-    if not repo_dir and st.session_state.get("repo_id"):
-        repo_dir = str(Path("./repos") / st.session_state.repo_id)
-        st.session_state.repo_dir = repo_dir
-
-    # Auto-heal: clone repo to ./repos/<repo_id> if directory doesn't exist on disk yet
-    if repo_dir and not Path(repo_dir).exists() and st.session_state.get("repo_url"):
-        try:
-            from ingest import clone_repo, REPOS_DIR
-            logger.info("Auto-cloning repo to %s for source viewer...", repo_dir)
-            Path(REPOS_DIR).mkdir(parents=True, exist_ok=True)
-            clone_repo(st.session_state.repo_url, repo_dir)
-        except Exception as exc:
-            logger.warning("Could not auto-clone for source viewer: %s", exc)
-
-    if not repo_dir or not Path(repo_dir).exists():
-        return
-
-    valid_sources = [
-        (src, Path(repo_dir) / src)
-        for src in sources
-        if (Path(repo_dir) / src).exists()
-    ]
-    if not valid_sources:
-        return
-    st.markdown("**📂 Referenced source files:**")
-    for src, file_path in valid_sources:
-        ext = file_path.suffix.lstrip(".")
-        try:
-            code = file_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception as exc:
-            logger.warning("Could not read %s for source viewer: %s", src, exc)
-            code = f"# Could not read file: {exc}"
-        with st.expander(f"📄 `{src}`", expanded=False):
-            st.code(code, language=ext or "text", line_numbers=True)
 
 
 # --- INTERACTIVE Q&A CHAT ---
@@ -225,15 +178,11 @@ else:
                 "content": "(Project summary generated above)"
             })
 
-        # Display past messages (and their source viewers if stored)
+        # Display past messages
         for msg in st.session_state.messages:
-            if msg["content"] == "(Project summary generated above)":
-                continue
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-            # Re-render source viewer for assistant messages that have cited sources
-            if msg["role"] == "assistant" and msg.get("sources"):
-                _render_source_viewer(msg["sources"], st.session_state.repo_dir)
+            if msg["content"] != "(Project summary generated above)":
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
         # Detect if user clicked an example question
         active_prompt = None
@@ -253,15 +202,5 @@ else:
             with st.chat_message("assistant"):
                 full_response = st.write_stream(st.session_state.qa.stream_answer(active_prompt))
 
-            # Capture cited sources immediately after streaming completes
-            cited_sources = list(st.session_state.qa.last_sources)
-
-            # Render source viewer right after the response (before rerun)
-            _render_source_viewer(cited_sources, st.session_state.repo_dir)
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": full_response,
-                "sources": cited_sources,   # persist so they re-render after rerun
-            })
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
             st.rerun()

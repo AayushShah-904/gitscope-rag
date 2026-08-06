@@ -31,7 +31,6 @@ load_dotenv()
 
 CHROMA_DIR = "./chroma_db"
 COLLECTION_NAME = "github_repo"
-REPOS_DIR = "./repos"  # permanent home for cloned repositories
 
 # Maps file extensions to their programming languages so we can split them correctly
 LANGUAGE_MAP: dict[str, Language | None] = {
@@ -181,12 +180,10 @@ def load_and_chunk_file(path: Path, repo_dir: str) -> list[Document]:
 
 # Main entry point for ingestion
 
-def ingest(repo_url: str, force_reingest: bool = False) -> tuple[Chroma, str, str]:
+def ingest(repo_url: str, force_reingest: bool = False) -> tuple[Chroma, str]:
     """
     This is the main function that coordinates cloning, chunking, and saving
     the GitHub repository into our Chroma database.
-    Returns (vectorstore, repo_id, repo_dir) where repo_dir is the permanent
-    path to the cloned repository on disk (used by the source code viewer).
     """
     repo_id = repo_id_from_url(repo_url)
     collection = f"{COLLECTION_NAME}_{repo_id}"
@@ -197,9 +194,6 @@ def ingest(repo_url: str, force_reingest: bool = False) -> tuple[Chroma, str, st
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
     )
-
-    # Permanent directory for this repo's cloned source files
-    repo_dir = str(Path(REPOS_DIR) / repo_id)
 
     # Check if already ingested
     if not force_reingest and Path(CHROMA_DIR).exists():
@@ -212,74 +206,66 @@ def ingest(repo_url: str, force_reingest: bool = False) -> tuple[Chroma, str, st
             chunk_count = vs._collection.count()
             if chunk_count > 0:
                 logger.info(
-                    "Collection '%s' already has %d chunks — skipping vector ingestion. "
+                    "Collection '%s' already has %d chunks — skipping ingestion. "
                     "Set force_reingest=True to redo.",
                     collection, chunk_count,
                 )
-                if not Path(repo_dir).exists():
-                    logger.info("Cloning source code to %s for source code viewer...", repo_dir)
-                    Path(REPOS_DIR).mkdir(parents=True, exist_ok=True)
-                    clone_repo(repo_url, repo_dir)
-                return vs, repo_id, repo_dir
+                return vs, repo_id
         except Exception:
             logger.debug("Could not read existing collection '%s'; will re-ingest.", collection)
 
-    # If force re-ingesting, remove the old clone so we start fresh
-    if force_reingest and Path(repo_dir).exists():
-        logger.info("Force re-ingest: removing existing clone at %s", repo_dir)
-        shutil.rmtree(repo_dir, ignore_errors=True)
+    # Clone into a temp dir
+    tmp = tempfile.mkdtemp()
+    try:
+        clone_repo(repo_url, tmp)
 
-    # Clone into the permanent repo directory (skip cloning if already present)
-    if not Path(repo_dir).exists():
-        Path(REPOS_DIR).mkdir(parents=True, exist_ok=True)
-        clone_repo(repo_url, repo_dir)
-    else:
-        logger.info("Repo already cloned at %s — skipping clone step.", repo_dir)
+        # Phase 1: Build the directory structure map so the LLM knows where files live
+        logger.info("Building directory tree ...")
+        tree_text = build_directory_tree(tmp)
+        tree_doc = Document(
+            page_content=f"# Repository structure\n\n```\n{tree_text}\n```",
+            metadata={"source": "__directory_tree__", "file_name": "__tree__", "language": "text", "extension": ""},
+        )
 
-    # Phase 1: Build the directory structure map so the LLM knows where files live
-    logger.info("Building directory tree ...")
-    tree_text = build_directory_tree(repo_dir)
-    tree_doc = Document(
-        page_content=f"# Repository structure\n\n```\n{tree_text}\n```",
-        metadata={"source": "__directory_tree__", "file_name": "__tree__", "language": "text", "extension": ""},
-    )
+        # Phase 2: Read, split, and organize the actual documentation and source code files
+        logger.info("Walking and chunking repository files ...")
+        all_docs: list[Document] = [tree_doc]
+        file_count = 0
 
-    # Phase 2: Read, split, and organize the actual documentation and source code files
-    logger.info("Walking and chunking repository files ...")
-    all_docs: list[Document] = [tree_doc]
-    file_count = 0
+        for file_path in walk_repo(tmp):
+            chunks = load_and_chunk_file(file_path, tmp)
+            if chunks:
+                all_docs.extend(chunks)
+                file_count += 1
 
-    for file_path in walk_repo(repo_dir):
-        chunks = load_and_chunk_file(file_path, repo_dir)
-        if chunks:
-            all_docs.extend(chunks)
-            file_count += 1
+        logger.info("Processed %d files → %d total chunks", file_count, len(all_docs))
 
-    logger.info("Processed %d files → %d total chunks", file_count, len(all_docs))
+        # Convert chunks to vector numbers and save them in the database in batches of 500
+        BATCH = 500
+        logger.info("Embedding and storing chunks in Chroma (batch size=%d) ...", BATCH)
+        vs = None
+        for i in range(0, len(all_docs), BATCH):
+            batch = all_docs[i : i + BATCH]
+            if vs is None:
+                vs = Chroma.from_documents(
+                    documents=batch,
+                    embedding=embeddings,
+                    collection_name=collection,
+                    persist_directory=CHROMA_DIR,
+                )
+            else:
+                vs.add_documents(batch)
+            logger.info("Stored %d / %d chunks ...", min(i + BATCH, len(all_docs)), len(all_docs))
 
-    # Convert chunks to vector numbers and save them in the database in batches of 500
-    BATCH = 500
-    logger.info("Embedding and storing chunks in Chroma (batch size=%d) ...", BATCH)
-    vs = None
-    for i in range(0, len(all_docs), BATCH):
-        batch = all_docs[i : i + BATCH]
-        if vs is None:
-            vs = Chroma.from_documents(
-                documents=batch,
-                embedding=embeddings,
-                collection_name=collection,
-                persist_directory=CHROMA_DIR,
-            )
-        else:
-            vs.add_documents(batch)
-        logger.info("Stored %d / %d chunks ...", min(i + BATCH, len(all_docs)), len(all_docs))
+        logger.info("Ingestion complete. %d chunks stored in collection '%s'.", len(all_docs), collection)
+        return vs, repo_id
 
-    logger.info("Ingestion complete. %d chunks stored in collection '%s'.", len(all_docs), collection)
-    return vs, repo_id, repo_dir
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
     import sys
     url = sys.argv[1] if len(sys.argv) > 1 else "https://github.com/tiangolo/fastapi"
-    vs, rid, rdir = ingest(url)
-    logger.info("Vectorstore ready. Repo ID: %s | Repo Dir: %s", rid, rdir)
+    vs, rid = ingest(url)
+    logger.info("Vectorstore ready. Repo ID: %s", rid)
